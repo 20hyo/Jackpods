@@ -67,7 +67,8 @@ def into_prompt(df):
         prompt = {
         "title": row.title,
         "description": row.description,
-        "sentiment": row.sentiment
+        "sentiment": row.sentiment,
+        "label": "기업동향" if row.label == 1 else "시장동향" if row.label == 2 else "투자 전략",
         }
         prompts.append(prompt)
     return prompts

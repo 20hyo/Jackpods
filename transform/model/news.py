@@ -8,3 +8,4 @@ class NewsItem(BaseModel):
     pub_date: str
     is_k: bool = False
     is_nc: bool = False
+    label: str = "0"  # Default to '0' if not specified

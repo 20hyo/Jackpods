@@ -13,13 +13,14 @@ def get_LLM_strategy():
     return LLMExtractionStrategy(
     llm_config=LLMConfig(
         provider=os.getenv("LLM_MODEL"),
-        api_token=os.getenv("DEEPSEEK_API_TOKEN")
+        api_token=os.getenv("Deep_Seek_API_TOKEN")
     ),
     instruction=(
         "title 필드엔 기사 제목 중 가장 대표되는 것 **하나만** 담아줘.\n"
         "description 필드엔 기사 핵심을 좀 자세하게 요약하고, 특히 한국 시장(KOSPI/KOSDAQ)와 관련된 내용이 있다면 ,한국 시장(KOSPI/KOSDAQ) 내용 중심으로 작성해줘.\n"
         "Kospi/Kosdaq 또는 한국 시장,한국 증권과 관련 되어 있다면 is_k 필드를 True로 해줘\n"
         "기사가 증권사 혹은 다른 기업을 광고하고 있는 광고성 기사가 맞다면 is_nc 필드를 False로 해주고 아니면 True 로 해줘\n"
+        "기업동향 관련 기사는 1으로 ,시장동향 관련 기사는 2로,투자 전략·포트폴리오 제안 관련 기사는 3으로 label 에 분류해줘.\n"
         "불필요한 수식어·기자명은 제거.\n"
         "모든 필드는 문자열(string) 하나씩만 포함해야 합니다."
     ),
