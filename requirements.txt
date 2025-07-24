@@ -1,0 +1,7 @@
+crawl4ai==0.7.0
+feedparser==6.0.11
+pandas==2.3.1
+pydantic==2.11.7
+python-dotenv==1.1.1
+pytz==2024.1
+Requests==2.32.4
