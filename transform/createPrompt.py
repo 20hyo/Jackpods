@@ -7,11 +7,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def analyze_sentiment(description):
-    url = os.getenv('CLOVA_STUDIO_URL')
+    url = os.getenv('ANALYZE_CLOVA_STUDIO_URL')
 
     headers = {
-        'Authorization': f"Bearer {os.getenv('NAVER_API_TOKEN')}",
-        'X-NCP-CLOVASTUDIO-REQUEST-ID': os.getenv('task_id'),
+        'Authorization': f"Bearer {os.getenv('ANALYZE_NAVER_API_TOKEN')}",
+        'X-NCP-CLOVASTUDIO-REQUEST-ID': os.getenv('ANALYZE_TASK_ID'),
         'Content-Type': 'application/json; charset=utf-8',
         'Accept': 'text/event-stream'
     }
@@ -41,13 +41,13 @@ def analyze_sentiment(description):
 
             # 간단하게 텍스트 내 감정 키워드만 추출
             if "positive" in full_response.lower():
-                return "positive"
+                return "긍정"
             elif "negative" in full_response.lower():
-                return "negative"
+                return "부정"
             elif "neutral" in full_response.lower():
-                return "neutral"
+                return "중립"
             else:
-                return "unknown"
+                return "알수 없음"
 
     except Exception as e:
         print(f"오류 발생: {e}")
@@ -57,8 +57,21 @@ def filter_data(df):
     return df[df["is_k"] & df["is_nc"]]
 
 def label_data(df):
-    df= filter_data(df)
+    df = filter_data(df)
     df["sentiment"] = df["description"].apply(analyze_sentiment)
+    
+    def map_label_to_korean(label_num):
+        if label_num == 1:
+            return "기업동향"
+        elif label_num == 2:
+            return "시장동향"
+        elif label_num == 3:
+            return "투자 전략"
+        else:
+            return "기타"
+
+    df["label"] = df["label"].apply(map_label_to_korean)
+    
     return df
 
 def into_prompt(df):

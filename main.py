@@ -31,7 +31,7 @@ def main():
     # #df = pd.DataFrame([item.dict() for item in results])
     # df = pd.DataFrame(results)
     # df.to_csv(f"news_summary_{now}.csv", index=False)
-    df= pd.read_csv(f"news_summary_{now}.csv")
+    df= pd.read_csv(f"news_summary_2025-07-22.csv")
     df_1=label_data(df)
     prompts = into_prompt(df_1)
     print(prompts[:5])  # Print first 5 prompts for verification
