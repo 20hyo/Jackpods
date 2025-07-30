@@ -1,181 +1,269 @@
 # -*- coding: utf-8 -*-
 import os
-import requests
 import json
-import os
+import requests
+import time
 from dotenv import load_dotenv
 from pymilvus import MilvusClient
 
 load_dotenv()
 
-try:
-    from IPython.display import display, Markdown
-except ImportError:
-    def display(obj):
-        if isinstance(obj, Markdown):
-            print(obj.text)
-        else:
-            print(obj)
-    class Markdown:
-        def __init__(self, text):
-            self.text = text
-        def __str__(self):
-            return self.text
-        def _repr_markdown_(self):
-            return self.text
-
-client = MilvusClient("./rag_test17_final.db")
-
+# =========[ Milvus / API 공통 설정 ]=========
+MILVUS_PROMPT_PATH = "./Plain_template.db"
 NEWS_COLLECTION_NAME = "rag_chunks"
 PROMPT_COLLECTION_NAME = "prompt_templates_collection"
 
-API_KEY = f"Bearer {os.getenv('SCRIPT_NAVER_API_TOKEN')}"
-EMBED_REQUEST_ID = os.getenv('EMBED_TASK_ID')
-GENERATION_REQUEST_ID = os.getenv('GENERATION_TASK_ID')
+client = MilvusClient(MILVUS_PROMPT_PATH)
+
+# CLOVA / Embedding
+API_KEY               = f"Bearer {os.getenv('SCRIPT_NAVER_API_TOKEN')}"
+EMBED_REQUEST_ID      = os.getenv('EMBED_TASK_ID')
+
+# CLOVA / Chat (분석용 & 생성용 각각 Request-ID만 다르게)
+SCRIPT_ANALYZE_RE_ID    = os.getenv('SCRIPT_ANALYZE_RE_ID')     # 분석
+SCRIPT_REQUEST_ID   = os.getenv('SCRIPT_REQUEST_ID')            # 대본 생성
+SSML_REQUEST_ID  = os.getenv('SSML_REQUEST_Id')                 # ssml변환
+
 
 HEADERS_BASE = {
     "Content-Type": "application/json; charset=utf-8",
     "Authorization": API_KEY
 }
 
+PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+
+def load_prompt(file_name: str) -> str:
+    """prompts/ 폴더에서 프롬프트 텍스트 읽어오기"""
+    path = os.path.join(PROMPT_DIR, file_name)
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+# ---------- [ 시스템 프롬프트 로드 ] ----------
+ANALYZE_SYSTEM = load_prompt("analyze_system.txt")      # 분석용
+DRAFT_SYSTEM  = load_prompt("draft_system.txt")       # Stage A
+SSML_SYSTEM   = load_prompt("ssml_system.txt")        # Stage B
+# ------------------------------------------------
+
+def store_combined_summary_in_milvus(combined_summary: str, label_id: str, tone: str):
+    """
+    요약문을 통합하고, 임베딩하여 rag_chunks 컬렉션에 저장합니다.
+    """
+    emb = embed_texts([combined_summary])
+    if not emb:
+        print("임베딩 실패. combined_summary를 Milvus에 저장할 수 없습니다.")
+        return False
+
+    data_to_insert = [
+        {
+            "vector": emb[0],  # embed_texts가 임베딩 목록을 반환한다고 가정
+            "combined_summary": combined_summary,
+            "label_id": label_id,
+            "tone": tone
+            # 고유 ID를 추가할 수도 있습니다. 예: "id": str(uuid.uuid4())
+        }
+    ]
+    try:
+        # NEWS_COLLECTION_NAME이 올바른 스키마(vector, combined_summary, label_id, tone)로 초기화되었는지 확인
+        # 이 설정 부분은 일반적으로 이 함수 외부에서 Milvus 컬렉션 생성 시 한 번만 수행됩니다.
+        # 예시 스키마:
+        # fields = [
+        #     FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=1024),
+        #     FieldSchema(name="combined_summary", dtype=DataType.VARCHAR, max_length=65535),
+        #     FieldSchema(name="label_id", dtype=DataType.VARCHAR, max_length=128),
+        #     FieldSchema(name="tone", dtype=DataType.VARCHAR, max_length=128)
+        # ]
+        # schema = CollectionSchema(fields, description="뉴스 요약을 위한 RAG 청크")
+        # client.create_collection(NEWS_COLLECTION_NAME, schema) if not client.has_collection(NEWS_COLLECTION_NAME) else None
+
+        client.insert(
+            collection_name=NEWS_COLLECTION_NAME,
+            data=data_to_insert
+        )
+        print(f"레이블 '{label_id}', 톤 '{tone}'에 대한 통합 요약이 Milvus에 저장되었습니다.")
+        return True
+    except Exception as e:
+        print(f"[store_combined_summary_in_milvus] 오류: {e}")
+        return False
+
+# =========[ Embedding ]=========
 def embed_texts(chunks):
+    """
+    CLOVA 임베딩 호출
+    """
     headers = HEADERS_BASE.copy()
     headers["X-NCP-CLOVASTUDIO-REQUEST-ID"] = EMBED_REQUEST_ID
 
-    embeddings = []
-
+    embs = []
     for i, chunk in enumerate(chunks):
         payload = {"text": chunk}
         try:
-            res = requests.post(
-                "https://clovastudio.stream.ntruss.com/v1/api-tools/embedding/clir-emb-dolphin",
-                headers=headers,
-                json=payload
-            )
+            res = requests.post("https://clovastudio.stream.ntruss.com/v1/api-tools/embedding/clir-emb-dolphin", headers=headers, json=payload)
             res.raise_for_status()
-
-            response_json = res.json()
-
-            if "result" in response_json and "embedding" in response_json["result"]:
-                embeddings.append(response_json["result"]["embedding"])
-            else:
-                print(f"오류: 청크 {i+1} ({chunk[:50]}...)에 대한 응답에 'result' 안에 'embedding' 키가 없습니다. 응답: {response_json}")
-                continue
-
-        except requests.exceptions.HTTPError as e:
-            print(f"HTTP 오류 발생 (청크 {i+1}, {chunk[:50]}...): {e.response.status_code} - {e.response.text}")
-            continue
-        except requests.exceptions.RequestException as e:
-            print(f"요청 오류 발생 (청크 {i+1}, {chunk[:50]}...): {e}")
-            continue
-        except json.JSONDecodeError:
-            print(f"JSON 디코딩 오류 (청크 {i+1}, {chunk[:50]}...): API 응답이 유효한 JSON이 아닙니다.")
-            continue
-
-    if not embeddings and chunks:
-        print("경고: 모든 청크에 대한 임베딩 생성에 실패했습니다. API 키, 모델, 요청 형식을 확인하세요.")
-
-    return embeddings
+            js = res.json()
+            embs.append(js["result"]["embedding"])
+        except Exception as e:
+            print(f"[embed_texts] ERROR on chunk {i}: {e}")
+    return embs
 
 
 def search_prompt_template(query_text, top_k=1):
-    query_embedding = embed_texts([query_text])
-    if not query_embedding or not query_embedding[0]:
-        print("오류: 쿼리 임베딩 생성에 실패했습니다.")
+    """
+    query_text 임베딩 → Milvus에서 템플릿 검색
+    return: 가장 유사한 템플릿 레코드(dict) or None
+    """
+    qemb = embed_texts([query_text])
+    if not qemb:
+        print("임베딩 실패.")
         return None
-
-    search_params = {
-        "data": query_embedding,
-        "collection_name": PROMPT_COLLECTION_NAME,
-        "limit": top_k,
-        "output_fields": ["template", "name", "description"],
-    }
 
     try:
-        res = client.search(**search_params)
-        if res and res[0]:
-            return res[0][0]["entity"]["template"]
-        else:
-            print(f"'{query_text}'에 대한 적합한 프롬프트 템플릿을 찾지 못했습니다.")
+        res = client.search(
+            data=qemb,
+            collection_name=PROMPT_COLLECTION_NAME,
+            limit=top_k,
+            output_fields=["template", "name", "description", "label_id", "tone"]
+        )
+        if not res or not res[0]:
             return None
+        top = res[0][0]["entity"]
+        return {
+            "template": top.get("template", ""),
+            "name": top.get("name", ""),
+            "description": top.get("description", ""),
+            "label_id": str(top.get("label_id", "")),
+            "tone": top.get("tone", "")
+        }
     except Exception as e:
-        print(f"프롬프트 템플릿 검색 중 오류 발생: {e}")
+        print(f"[search_prompt_template] ERRR: {e}")
         return None
 
 
-def generate_script(news_summary, prompt_template_content):
-    headers = HEADERS_BASE.copy()
-    headers["X-NCP-CLOVASTUDIO-REQUEST-ID"] = GENERATION_REQUEST_ID
+def call_clova_chat(
+        messages,
+        request_id,
+        effort="medium",
+        max_tokens=2000,
+        temperature=0.7,
+        top_p=0.8,
+        top_k=0,
+        repeat_penalty=1.1,
+        seed=0,
+        model_id="HCX-007"):
+    
+    time.sleep(10)
 
-    prompt = f"뉴스 요약: {news_summary}\n\n위 뉴스 요약본을 바탕으로 아래 프롬프트 템플릿에 따라 SSML 형식의 대본을 작성해 주세요.\n\n프롬프트 템플릿: {prompt_template_content}"
+    headers = HEADERS_BASE.copy()
+    headers["X-NCP-CLOVASTUDIO-REQUEST-ID"] = request_id
 
     payload = {
-        "messages": [
-            {"role": "system", "content": f"""
-당신은 경제 방송 대본 작가입니다. 다음 지침을 철저히 따라 SSML(Speech Synthesis Markup Language) 형식의 한국어 대본을 작성해야 합니다.
-특히 각 대화의 논리적인 흐름에 따라 <segment id='...'> 태그를 사용하여 각 발화나 대화 턴을 명확하게 구분해야 합니다.
-화자별 <voice>, <prosody>, <break>, <emphasis>, <sub>, <say-as> 태그를 적극적으로 활용합니다.
-- **화자 구분:**
-    - 사회자: <voice name="Seoyeon"><prosody rate="medium" pitch="default">내용</prosody></voice> 형식으로 작성합니다. **(pitch 속성 필수 포함)**
-    - 전문가: <voice name="Injoon"><prosody rate="medium" pitch="low">내용</prosody></voice> 형식으로 작성합니다. (전문가는 사회자보다 약간 낮은 톤으로 설정) **(pitch 속성 필수 포함)**
-- **휴지 (쉼):**
-    - 짧은 쉼: `<break time="0.2s"/>`
-    - 중간 쉼: `<break time="0.5s"/>`
-    - 긴 쉼: `<break time="1s"/>`
-    - **명시적인 지침:** 텍스트의 자연스러운 흐름과 의미적 단락에 맞춰 **쉼표(,) 뒤에는 `<break time="0.2s"/>`를, 마침표(.) 뒤에는 `<break time="0.5s"/>`를 기본으로 사용**하되, 문장이나 구절의 **강조, 전환, 또는 청취자의 이해를 돕기 위해 필요하다면 `<break time="0.7s"/>`나 `<break time="1s"/>`와 같은 더 긴 쉼을 적극적으로 사용**합니다. 사람이 대화하는 것처럼 자연스러운 리듬감을 구현해야 합니다. 특히, 문장 중간의 호흡을 위해 짧은 쉼을 더욱 적극적으로 활용하세요.
-- **강조:**
-    - 중요한 정보나 핵심 키워드는 `<emphasis level="strong">강조할 내용</emphasis>`으로 표현합니다.
-    - 일반적인 강조는 `<emphasis level="moderate">강조할 내용</emphasis>`으로 표현합니다.
-- **발화 속도 및 음높이:**
-    - `<prosody rate="fast">빠르게</prosody>`, `<prosody rate="slow">느리게</prosody>`
-    - `<prosody pitch="high">높은 음으로</prosody>`, `<prosody pitch="low">낮은 음으로</prosody>`
-- **볼륨:** `<prosody volume="loud">큰 소리로</prosody>`, `<prosody volume="soft">작은 소리로</prosody>`
-- **발음 대체:** 고유명사나 약어 등 발음하기 어려운 단어는 `<sub alias="일레븐랩스">ElevenLabs</sub>`와 같이 정확한 발음을 지정합니다.
-- **숫자/특수어 발음:**
-    - 숫자: `<say-as interpret-as="cardinal">123</say-as>` (기수), `<say-as interpret-as="digits">123</say-as>` (개별 숫자)
-    - 약어: `<say-as interpret-as="characters">AI</say-as>` (알파벳 단위 발음)
-- **문단/문장:** `<p>` 태그로 문단을, `<s>` 태그로 문장을 구분하면 더 정교한 제어가 가능합니다. (필수 아님, 모델의 자유도 허용)
-- **세그먼트:** 각 대화의 논리적인 흐름에 따라 `<segment id="segment_id_name">` 태그를 사용하여 각 발화나 대화 턴을 구분합니다. `segment_id_name`은 해당 세그먼트의 내용을 잘 나타내는 고유한 이름을 사용합니다. **예시: 오프닝은 `intro_host`, 질문은 `host_question_1`, 답변은 `expert_answer_1` 등으로 명시하며, 각 세그먼트 ID 끝에는 순번(N)을 붙여주세요. (예: `host_question_1`, `host_question_2`, `comparison_host_1`, `risk_expert_1` 등)**
-모든 응답과 대본 내용은 반드시 한국어로 작성되어야 합니다.
-"""},
-            {"role": "user", "content": prompt}
-        ],
-        "topP": 0.8,
-        "temperature": 0.7,
-        "maxTokens": 2000
+        "messages": messages,
+        "effort" : effort,
+        "maxCompletionTokens": max_tokens,
+        "temperature": temperature,
+        "topP": top_p,
+        "topK": top_k,
+        "repeatPenalty": repeat_penalty,
+        "seed": seed,
+        # 필요 시 stopBefore / includeAiFilters 등 추가
     }
 
     try:
-        res = requests.post(
-            "https://clovastudio.stream.ntruss.com/v3/chat-completions/HCX-005",
-            headers=headers,
-            json=payload
-        )
-        res.raise_for_status()
+        url = f"https://clovastudio.stream.ntruss.com/v3/chat-completions/{model_id}"
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r.raise_for_status()
+        js = r.json()
+        return js["result"]["message"]["content"]
+    except Exception as e:
+        print(f"[call_clova_chat] ERROR: {e}")
+        return ""
 
-        response_json = res.json()
-
-        if "result" in response_json and "message" in response_json["result"] and "content" in response_json["result"]["message"]:
-            return response_json["result"]["message"]["content"]
-        else:
-            print("CLOVA Studio 대본 생성 API 응답 오류:", response_json)
-            if "status" in response_json and "message" in response_json["status"]:
-                print(f"오류 메시지: {response_json['status']['message']}")
-            raise ValueError("대본 생성에 실패했습니다. CLOVA Studio 응답을 확인하세요.")
-
-    except requests.exceptions.HTTPError as e:
-        print(f"HTTP 오류 발생 (대본 생성): {e.response.status_code} - {e.response.text}")
-        return "대본 생성 중 HTTP 오류가 발생했습니다."
-    except requests.exceptions.RequestException as e:
-        print(f"요청 오류 발생 (대본 생성): {e}")
-        return "대본 생성 중 요청 오류가 발생했습니다."
+def analyze_and_plan(combined_summary:str, label_kor:str, tone:str):
+    """
+    뉴스 합본과 메타정보(라벨, 톤)를 바탕으로 JSON 계획을 생성합니다.
+    """
+    user_prompt = f"""[CATEGORY]: {label_kor}
+[TONE]: {tone}
+[NEWS_SUMMARY]:
+{combined_summary}
+"""
+    messages = [
+        {"role":"system","content": ANALYZE_SYSTEM},
+        {"role":"user",  "content": user_prompt}
+    ]
+    raw = call_clova_chat(messages, SCRIPT_ANALYZE_RE_ID, effort="high", max_tokens=20480, temperature=0.2)
+    plan = {"raw_output": raw} # 파싱 실패 시 원본 출력을 초기화
+    try:
+        parsed_plan = json.loads(raw)
+        # 중요 필드가 누락된 경우 기본 유효성 검사/기본값 설정
+        plan["core_message"] = parsed_plan.get("core_message", "핵심 메시지를 찾을 수 없습니다.")
+        plan["key_points"] = parsed_plan.get("key_points", [])
+        plan["key_numbers"] = parsed_plan.get("key_numbers", [])
+        plan["risk"] = parsed_plan.get("risk", "")
+        plan["opportunity"] = parsed_plan.get("opportunity", "")
+        plan["chapters"] = parsed_plan.get("chapters", [])
+        # 예상되는 다른 필드와 해당 기본값을 추가합니다.
     except json.JSONDecodeError:
-        print(f"JSON 디코딩 오류 (대본 생성): API 응답이 유효한 JSON이 아닙니다.")
-        return "대본 생성 중 응답 처리 오류가 발생했습니다."
+        print("[analyze_and_plan] JSON 파싱 실패. 원문 포함 반환.")
+        # 파싱이 완전히 실패하면, raw 텍스트에서 일부 기본 정보를 추출하거나
+        # 일반적인 기본값을 사용하도록 시도할 수 있습니다.
+        # 단순화를 위해 현재는 원본 출력만 제공됩니다.
+    except Exception as e:
+        print(f"[analyze_and_plan] 예상치 못한 오류: {e}. 원문 포함 반환.")
+
+    print("### DEBUG PLAN ###\n",
+        json.dumps(plan, indent=2, ensure_ascii=False))
+    
+    return plan
 
 
-def display_script(script):
-    """
-    생성된 SSML 스크립트를 터미널에 직접 출력합니다.
-    """
+def build_draft_prompt(summary, plan, template_text, label, tone):
+    return (
+        f"[CONTEXT_SUMMARY]\n{summary}\n\n"
+        f"[LABEL]: {label}\n[TONE]: {tone}\n\n"
+        "[PLAN_JSON]\n" + json.dumps(plan, ensure_ascii=False, indent=2) + "\n\n"
+        "[CHAPTER_CONTENT_GUIDE]\n" + template_text + "\n\n"
+        "[INSTRUCTION]\n"
+        "가이드를 따르되 SSML 태그는 절대 쓰지 말고 구어체 대본만 작성."\
+    )
+
+def generate_draft(summary, label, tone, template_text):
+    plan = analyze_and_plan(summary, label, tone)
+    prompt = build_draft_prompt(summary, plan, template_text, label, tone)
+    msgs = [
+        {"role": "system", "content": DRAFT_SYSTEM},
+        {"role": "user", "content": prompt},
+    ]
+    return call_clova_chat(msgs, SCRIPT_REQUEST_ID, effort="high", max_tokens=32768, temperature=0.55, model_id="HCX-007")
+
+# =========  Stage B – SSML 변환  ============================================
+
+def build_ssml_prompt(draft_script, tone):
+    return (
+        "[PLAIN_SCRIPT]\n" + draft_script + "\n\n"
+        "[TONE_HINT]\n" + tone + "\n\n"
+        "[INSTRUCTION]\n"
+        "문장 내용은 바꾸지 않고 SSML 태그만 삽입해 변환."\
+    )
+
+def convert_to_ssml(draft_script, tone):
+    msgs = [
+        {"role": "system", "content": SSML_SYSTEM},
+        {"role": "user", "content": build_ssml_prompt(draft_script, tone)},
+    ]
+    return call_clova_chat(msgs, SSML_REQUEST_ID, max_tokens=10240, temperature=0.8)
+
+def display_script(script: str) -> None:
+    """SSML(또는 초안)을 콘솔에 그대로 출력"""
     print(script)
+
+# =========  Top‑level helper  ===============================================
+
+def run_one_block(summary, label, tone):
+    tpl = search_prompt_template(f"{label} 대본 템플릿 {tone}")
+    if not tpl:
+        print("[run_one_block] Template not found")
+        return None, None
+
+    draft = generate_draft(summary, label, tone, tpl["template"])
+    ssml  = convert_to_ssml(draft, tone)
+    return draft, ssml

@@ -13,7 +13,7 @@ from transform.summarizer import run as summarize_news # Renamed to avoid confli
 from transform.createPrompt import label_data, into_prompt
 
 # Import script generation functions from the new module
-from script_generation.script import search_prompt_template, generate_script, display_script
+from script_generation.script import search_prompt_template, generate_draft, convert_to_ssml, display_script
 
 def main():
     kst = pytz.timezone('Asia/Seoul')
@@ -67,8 +67,8 @@ def main():
     # 각 그룹의 뉴스 설명을 합치고, 대표 감정을 선택 (여기서는 첫 번째 기사의 감정을 대표 감정으로 사용)
     grouped_news = {}
     for index, row in df_labeled.iterrows():
-        label = row['label']
-        sentiment = row['sentiment']
+        label = row['label_kor']
+        sentiment = row['tone']
         description = row['description']
 
         if label not in grouped_news:
@@ -86,23 +86,60 @@ def main():
         print(f"[대표 감정]: {representative_sentiment}")
         print(f"[포함된 뉴스 개수]: {len(data['descriptions'])}")
 
+        # 통합 요약을 Milvus에 저장 (새로운 부분)
+        # RAG의 '원천 정보'라면 여기에 저장하는 것을 고려
+        # store_combined_summary_in_milvus(combined_description, label, representative_sentiment)
+
+
         # 프롬프트 템플릿 검색 쿼리 생성
-        query_for_prompt_template = f"{label} 대본 생성 {representative_sentiment}"
+        # 다이어그램 예시와 일치하도록 쿼리 변경:
+        query_for_prompt_template = f"{label}_긍정_PlainText_KR" # 다이어그램 예시와 일치하도록 변경
         print(f"프롬프트 템플릿 검색 쿼리: '{query_for_prompt_template}'")
 
         selected_prompt_template_content = search_prompt_template(query_for_prompt_template, top_k=1)
 
         if not selected_prompt_template_content:
             print(f"적합한 프롬프트 템플릿을 찾지 못하여 '{label}' 분류에 대한 대본 생성을 건너갑니다.")
+            # --- 템플릿 폴백 로직 (새로운 부분) ---
+            print(f"템플릿 검색 실패. 폴백 로직 시도: label_id='{label}', tone='{representative_sentiment}'")
+            # 이것은 폴백에 대한 플레이스홀더입니다. 실제로는
+            # 기본 템플릿을 위한 하드코딩된 딕셔너리 또는 다른 조회 메커니즘이 있을 수 있습니다.
+            # 예시 (DEFAULT_PROMPT_TEMPLATES를 어딘가에 정의해야 함):
+            # fallback_key = f"{label}_{representative_sentiment}"
+            # if fallback_key in DEFAULT_PROMPT_TEMPLATES:
+            #     selected_prompt_template_content = {"template": DEFAULT_PROMPT_TEMPLATES[fallback_key]}
+            #     print(f"폴백 템플릿 사용: {fallback_key}")
+            # else:
+            #     print(f"폴백 템플릿도 찾을 수 없어 '{label}' 분류에 대한 대본 생성을 건너갑니다.")
+            #     continue # 폴백 후에도 템플릿을 찾지 못하면 건너뜁니다.
+            continue # 현재는 찾지 못하면 그냥 건너뜁니다.
+            # --- 폴백 로직 끝 ---
         else:
             # SSML 대본 생성 (그룹화된 설명을 사용)
-            script = generate_script(combined_description, selected_prompt_template_content)
+            # generate_script 내부에서 'rag_chunks'에서 RAG를 구현한다면,
+            # combined_description을 직접 전달할 필요 없이 쿼리만 전달하거나,
+            # generate_script가 스스로 결정하도록 할 수 있습니다.
+ # ① 초안 생성 ───────────────────────────────
+            draft_script = generate_draft(
+                summary=combined_description,            # 통합 요약
+                label=label,                             # 예: "거시경제"
+                tone=representative_sentiment,           # 예: "positive"
+                template_text=selected_prompt_template_content["template"]
+            )
 
-            print("\n--- 생성된 SSML 대본 ---")
-            display_script(script)
-            print("--- 대본 생성 완료 ---")
+            print("\n--- 생성된 대본 초안 (Plain) ---")
+            display_script(draft_script)                # 필요 없으면 주석 처리
 
-    print("\n--- 전체 대본 생성 파이프라인 완료 ---")
+            # ② SSML 변환 ──────────────────────────────
+            ssml_script = convert_to_ssml(
+                draft_script=draft_script,
+                tone=representative_sentiment
+            )
+
+            print("\n--- 최종 SSML 대본 ---")
+            display_script(ssml_script)
+    print("--- 대본 생성 완료 ---")
+
 
 
 if __name__ == "__main__":
