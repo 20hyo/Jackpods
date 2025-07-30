@@ -1,8 +1,10 @@
-crawl4ai==0.7.0
+crawl4ai==0.7.2
 feedparser==6.0.11
 pandas==2.3.1
 pydantic==2.11.7
 python-dotenv==1.1.1
-pytz==2024.1
+pytz==2025.2
 Requests==2.32.4
-pymilvus==2.5.13
+pymilvus==2.5.14
+elevenlabs==2.8.1
+dotenv==0.9.9
